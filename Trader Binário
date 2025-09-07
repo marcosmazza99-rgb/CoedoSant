@@ -1,0 +1,123 @@
+import yfinance as yf
+import pandas as pd
+import ta
+import streamlit as st
+import plotly.graph_objects as go
+import time
+from telegram import Bot
+
+# ===== CONFIGURAÇÕES =====
+TELEGRAM_TOKEN = "SEU_TOKEN_AQUI"
+CHAT_ID = "SEU_CHAT_ID_AQUI"
+INTERVALO_SEGUNDOS = 60  # Atualização do painel
+
+# Lista de ativos
+ativos = st.multiselect("Selecione ativos", ["BTC-USD", "ETH-USD", "AAPL", "EURUSD=X"], default=["BTC-USD", "ETH-USD"])
+
+# Inicializa bot Telegram
+bot = Bot(token=TELEGRAM_TOKEN)
+
+# ===== FUNÇÕES =====
+def get_data(symbol, period="5d", interval="1m"):
+    try:
+        data = yf.download(symbol, period=period, interval=interval)
+        return data
+    except:
+        return None
+
+def analyze_asset(data):
+    data['MA5'] = data['Close'].rolling(5).mean()
+    data['MA20'] = data['Close'].rolling(20).mean()
+    data['RSI'] = ta.momentum.RSIIndicator(data['Close'], window=14).rsi()
+    data['MACD'] = ta.trend.MACD(data['Close']).macd_diff()
+    data['Volatility'] = data['Close'].pct_change().rolling(20).std()
+    
+    last = data.iloc[-1]
+    prev = data.iloc[-2]
+    
+    signal = "AGUARDAR"
+    if last['Volatility'] < 0.001:
+        signal = "AGUARDAR (Baixa volatilidade)"
+    else:
+        if last['MA5'] > last['MA20'] and prev['MA5'] <= prev['MA20']:
+            signal = "COMPRA"
+        elif last['MA5'] < last['MA20'] and prev['MA5'] >= prev['MA20']:
+            signal = "VENDA"
+        if last['RSI'] < 30:
+            signal = "COMPRA"
+        elif last['RSI'] > 70:
+            signal = "VENDA"
+        if (signal == "COMPRA" and last['MACD'] > 0) or (signal == "VENDA" and last['MACD'] < 0):
+            signal += " (CONFIRMADO MACD)"
+        else:
+            signal = "AGUARDAR (Sem confirmação MACD)"
+    
+    return {
+        "Preço": round(last['Close'], 2),
+        "RSI": round(last['RSI'], 2),
+        "MACD": round(last['MACD'], 5),
+        "Volatilidade": round(last['Volatility'], 5),
+        "Sinal": signal
+    }
+
+def send_telegram_alert(ativo, signal, price):
+    if "AGUARDAR" not in signal:
+        message = f"📈 {ativo} - {signal}\nPreço atual: {price}"
+        bot.send_message(chat_id=CHAT_ID, text=message)
+
+def color_signal(val):
+    if "COMPRA" in val:
+        return 'color: green'
+    elif "VENDA" in val:
+        return 'color: red'
+    else:
+        return 'color: orange'
+
+# ===== INTERFACE =====
+st.set_page_config(page_title="Trader Binário Pro", layout="wide")
+st.title("📊 Trader Binário Profissional - Mobile")
+
+st.write(f"Painel atualizado a cada {INTERVALO_SEGUNDOS} segundos")
+
+# ===== LOOP PRINCIPAL =====
+last_signals = {ativo: "" for ativo in ativos}
+
+while True:
+    painel = {}
+    for ativo in ativos:
+        data = get_data(ativo)
+        if data is not None:
+            info = analyze_asset(data)
+            painel[ativo] = info
+            
+            # Enviar alerta apenas se sinal mudou
+            if info['Sinal'] != last_signals[ativo]:
+                send_telegram_alert(ativo, info['Sinal'], info['Preço'])
+                last_signals[ativo] = info['Sinal']
+    
+    df = pd.DataFrame(painel).T
+    st.dataframe(df.style.applymap(color_signal, subset=['Sinal']))
+    
+    # Gráficos interativos por ativo
+    for ativo in ativos:
+        data = get_data(ativo)
+        if data is not None:
+            st.subheader(f"{ativo} - Gráficos")
+            # Preço e Médias Móveis
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=data.index, y=data['Close'], mode='lines', name='Preço'))
+            fig.add_trace(go.Scatter(x=data.index, y=data['Close'].rolling(5).mean(), mode='lines', name='MA5'))
+            fig.add_trace(go.Scatter(x=data.index, y=data['Close'].rolling(20).mean(), mode='lines', name='MA20'))
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # RSI
+            fig_rsi = go.Figure()
+            fig_rsi.add_trace(go.Scatter(x=data.index, y=ta.momentum.RSIIndicator(data['Close']).rsi(), mode='lines', name='RSI'))
+            st.plotly_chart(fig_rsi, use_container_width=True)
+            
+            # MACD
+            fig_macd = go.Figure()
+            fig_macd.add_trace(go.Scatter(x=data.index, y=ta.trend.MACD(data['Close']).macd_diff(), mode='lines', name='MACD Diff'))
+            st.plotly_chart(fig_macd, use_container_width=True)
+    
+    time.sleep(INTERVALO_SEGUNDOS)
